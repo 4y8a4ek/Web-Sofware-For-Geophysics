@@ -1,5 +1,7 @@
 import os
 import uuid
+import json
+import asyncio
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -9,19 +11,50 @@ import numpy as np
 from skimage.measure import marching_cubes
 import open3d as o3d
 from config import DATA_DIR
+from aiokafka import AIOKafkaProducer
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Mesh Generator MVP")
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
-tasks = {}
+producer = None
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+
+async def init_kafka():
+    global producer
+    while True:
+        try:
+            producer = AIOKafkaProducer(
+                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+                value_serializer=lambda v: json.dumps(v).encode('utf-8')
+            )
+            await producer.start()
+            logger.info("✅ Kafka producer started")
+            break
+        except Exception as e:
+            logger.warning(f"⚠️ Kafka not ready: {e}, retrying in 5s...")
+            await asyncio.sleep(5)
+
+@app.on_event("startup")
+async def startup():
+    asyncio.create_task(init_kafka())
+
+@app.on_event("shutdown")
+async def shutdown():
+    if producer:
+        await producer.stop()
+
+tasks = {}  # in-memory
 
 def generate_stl(raw_path: str, shape, factor: int) -> str:
     data = np.fromfile(raw_path, dtype=np.uint8).reshape(shape)
-    data = 1 - data  # твёрдая фаза
+    data = 1 - data
     if factor > 1:
-        # Прореживание: объединяем factor×factor×factor вокселей
         data = data[::factor, ::factor, ::factor]
     verts, faces, _, _ = marching_cubes(data, level=0.5, spacing=(1.0, 1.0, 1.0))
     mesh = o3d.geometry.TriangleMesh()
@@ -32,12 +65,25 @@ def generate_stl(raw_path: str, shape, factor: int) -> str:
     o3d.io.write_triangle_mesh(stl_path, mesh)
     return stl_path
 
-def process_task(task_id: str, raw_path: str, shape, factor: int):
+async def process_task(task_id: str, raw_path: str, shape, factor: int):
     try:
         tasks[task_id]["status"] = "processing"
         stl_path = generate_stl(raw_path, shape, factor)
         tasks[task_id]["status"] = "done"
         tasks[task_id]["stl_path"] = stl_path
+
+        # Отправляем задачу в Kafka
+        task_data = {
+            "task_id": task_id,
+            "stl_path": stl_path,
+            "shape": shape,
+            "factor": factor
+        }
+        # Ждём пока producer инициализируется
+        while producer is None:
+            await asyncio.sleep(0.5)
+        await producer.send("tasks", value=task_data)
+
     except Exception as e:
         tasks[task_id]["status"] = "error"
         tasks[task_id]["error"] = str(e)
@@ -52,7 +98,7 @@ async def upload_file(
     shape_x: int = Form(200),
     shape_y: int = Form(200),
     shape_z: int = Form(200),
-    factor: int = Form(1)   # вместо cell_size
+    factor: int = Form(1)
 ):
     if not file.filename.endswith('.raw'):
         raise HTTPException(400, "Only .raw files are supported")
