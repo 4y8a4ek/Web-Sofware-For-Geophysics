@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  api:
+    build: ./data/mainservice
+    container_name: mesh-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      - DATA_DIR=/data
+    restart: unless-stopped

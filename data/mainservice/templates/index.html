@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Mesh Generator</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: #0f0f1a;
+            color: #eee;
+            overflow: hidden;
+            height: 100vh;
+        }
+        #app {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        #header {
+            background: rgba(20, 20, 40, 0.9);
+            backdrop-filter: blur(6px);
+            padding: 16px 24px;
+            border-bottom: 1px solid #2a2a4a;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 12px;
+            z-index: 10;
+            flex-shrink: 0;
+        }
+        #header h1 {
+            font-size: 20px;
+            font-weight: 500;
+            background: linear-gradient(135deg, #6c5ce7, #00b4d8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        #header .controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        #header .controls label {
+            font-size: 13px;
+            color: #aaa;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        #header .controls input[type="file"] { display: none; }
+        .file-label {
+            display: inline-block;
+            padding: 8px 16px;
+            background: #2a2a4a;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: 0.2s;
+        }
+        .file-label:hover { background: #3a3a5a; }
+        #fileName {
+            font-size: 13px;
+            color: #88ccff;
+            max-width: 200px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        #uploadBtn {
+            padding: 8px 20px;
+            background: #28a745;
+            border: none;
+            border-radius: 6px;
+            color: white;
+            font-size: 14px;
+            cursor: pointer;
+            transition: 0.2s;
+            font-weight: 500;
+        }
+        #uploadBtn:hover { background: #218838; }
+        #uploadBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+        #status {
+            font-size: 14px;
+            color: #aaa;
+            min-width: 150px;
+            text-align: right;
+        }
+        .dims {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .dims label {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 13px;
+            color: #aaa;
+        }
+        .dims input {
+            width: 55px;
+            padding: 4px 6px;
+            border-radius: 4px;
+            border: 1px solid #444;
+            background: #1a1a2e;
+            color: #eee;
+            text-align: center;
+            font-size: 13px;
+        }
+        .dims input:disabled { opacity: 0.6; }
+        #three-container {
+            flex: 1;
+            position: relative;
+            background: #0f0f1a;
+        }
+        #three-container canvas {
+            display: block;
+            width: 100% !important;
+            height: 100% !important;
+        }
+        #info {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255,255,255,0.3);
+            font-size: 12px;
+            background: rgba(0,0,0,0.4);
+            padding: 4px 16px;
+            border-radius: 20px;
+            pointer-events: none;
+            z-index: 5;
+        }
+        @media (max-width: 800px) {
+            #header { flex-direction: column; align-items: stretch; }
+            #header .controls { justify-content: center; }
+            #status { text-align: center; }
+        }
+        .hint {
+            font-size: 11px;
+            color: #666;
+            margin-left: 4px;
+        }
+    </style>
+</head>
+<body>
+<div id="app">
+    <div id="header">
+        <h1>🧊 3D Mesh Generator</h1>
+        <div class="controls">
+            <label class="file-label" for="fileInput">📁 Выбрать .raw</label>
+            <input type="file" id="fileInput" accept=".raw" />
+            <span id="fileName">Файл не выбран</span>
+
+            <div class="dims">
+                <label>X <input type="number" id="dimX" min="1" step="1" disabled /></label>
+                <label>Y <input type="number" id="dimY" min="1" step="1" disabled /></label>
+                <label>Z <input type="number" id="dimZ" min="1" step="1" disabled /></label>
+            </div>
+
+            <label>
+                Фактор объединения
+                <input type="number" id="factor" value="1" min="1" step="1" style="width:60px;" />
+                <span class="hint">(1 – без изменений, 2 – объединить 2×2×2)</span>
+            </label>
+
+            <button id="uploadBtn" disabled>🚀 Построить</button>
+            <span id="status">Готов</span>
+        </div>
+    </div>
+    <div id="three-container"></div>
+    <div id="info">Three.js · Перетащите для вращения · Колесико для масштаба</div>
+</div>
+
+<!-- Three.js -->
+<script type="importmap">
+{
+    "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+
+// DOM
+const fileInput = document.getElementById('fileInput');
+const fileName = document.getElementById('fileName');
+const uploadBtn = document.getElementById('uploadBtn');
+const statusDiv = document.getElementById('status');
+const dimX = document.getElementById('dimX');
+const dimY = document.getElementById('dimY');
+const dimZ = document.getElementById('dimZ');
+const factorInput = document.getElementById('factor');
+const container = document.getElementById('three-container');
+
+let selectedFile = null;
+let scene, camera, renderer, controls;
+let currentMesh = null;
+let taskId = null;
+
+// --- Автоопределение размера (кубический корень) ---
+function autoDetectSize(file) {
+    const bytes = file.size;
+    const side = Math.round(Math.cbrt(bytes));
+    const maxSide = 600;
+    return { x: Math.min(side, maxSide), y: Math.min(side, maxSide), z: Math.min(side, maxSide) };
+}
+
+fileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) {
+        selectedFile = file;
+        fileName.textContent = file.name;
+        const size = autoDetectSize(file);
+        dimX.value = size.x;
+        dimY.value = size.y;
+        dimZ.value = size.z;
+        uploadBtn.disabled = false;
+        statusDiv.textContent = `Файл ${file.name} (${(file.size/1024/1024).toFixed(2)} MB) → ${size.x}³`;
+    } else {
+        selectedFile = null;
+        fileName.textContent = 'Файл не выбран';
+        uploadBtn.disabled = true;
+        statusDiv.textContent = 'Готов';
+        dimX.value = '';
+        dimY.value = '';
+        dimZ.value = '';
+    }
+});
+
+// --- Three.js ---
+function initThree() {
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0f0f1a);
+
+    camera = new THREE.PerspectiveCamera(45, w/h, 0.1, 1000);
+    camera.position.set(3, 2, 5);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(w, h);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    container.appendChild(renderer.domElement);
+
+    controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.enableZoom = false; // <-- отключаем колесико
+    controls.target.set(0, 0, 0);
+    controls.update();
+
+    const ambient = new THREE.AmbientLight(0x404060);
+    scene.add(ambient);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+    dirLight.position.set(1, 2, 1);
+    scene.add(dirLight);
+    const backLight = new THREE.DirectionalLight(0x88aaff, 0.5);
+    backLight.position.set(-1, -0.5, -1);
+    scene.add(backLight);
+
+    window.addEventListener('resize', () => {
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+        camera.aspect = w/h;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w, h);
+    });
+
+    animate();
+}
+
+function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+}
+
+// --- Загрузка STL через Three.js ---
+function loadSTL(url) {
+    return new Promise((resolve, reject) => {
+        const loader = new STLLoader();
+        loader.load(url, (geometry) => {
+            geometry.computeVertexNormals();
+            const material = new THREE.MeshStandardMaterial({
+                color: 0x4488ff,
+                roughness: 0.4,
+                metalness: 0.1,
+                side: THREE.DoubleSide,
+            });
+            const mesh = new THREE.Mesh(geometry, material);
+            const box = new THREE.Box3().setFromObject(mesh);
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z);
+            const scale = 2.0 / maxDim;
+            mesh.scale.set(scale, scale, scale);
+            mesh.position.copy(center.clone().multiplyScalar(-scale));
+            resolve(mesh);
+        }, undefined, reject);
+    });
+}
+
+// --- Отправка файла ---
+uploadBtn.addEventListener('click', async () => {
+    if (!selectedFile) return;
+    const x = parseInt(dimX.value) || 200;
+    const y = parseInt(dimY.value) || 200;
+    const z = parseInt(dimZ.value) || 200;
+    const factor = parseInt(factorInput.value) || 1;
+    if (x<1 || y<1 || z<1 || factor<1) {
+        statusDiv.textContent = '❌ Размеры >= 1, фактор >= 1';
+        return;
+    }
+
+    uploadBtn.disabled = true;
+    statusDiv.textContent = '⏳ Загрузка и генерация...';
+
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+    formData.append('shape_x', String(x));
+    formData.append('shape_y', String(y));
+    formData.append('shape_z', String(z));
+    formData.append('factor', String(factor));
+
+    try {
+        const response = await fetch('/upload', { method: 'POST', body: formData });
+        if (!response.ok) {
+            const err = await response.text();
+            throw new Error(err);
+        }
+        const data = await response.json();
+        taskId = data.task_id;
+        statusDiv.textContent = '⏳ Обработка... (pending)';
+
+        let done = false;
+        while (!done) {
+            await new Promise(r => setTimeout(r, 2000));
+            const statusResp = await fetch(`/status/${taskId}`);
+            if (!statusResp.ok) continue;
+            const statusData = await statusResp.json();
+            const status = statusData.status;
+            statusDiv.textContent = `⏳ Обработка... (${status})`;
+            if (status === 'done') {
+                done = true;
+            } else if (status === 'error') {
+                throw new Error(statusData.error || 'Ошибка генерации');
+            }
+        }
+
+        statusDiv.textContent = '✅ Модель готова! Загрузка...';
+
+        if (!renderer) {
+            initThree();
+        }
+        const stlUrl = `/download/${taskId}`;
+        const mesh = await loadSTL(stlUrl);
+        if (currentMesh) {
+            scene.remove(currentMesh);
+            currentMesh.geometry.dispose();
+            currentMesh.material.dispose();
+        }
+        scene.add(mesh);
+        currentMesh = mesh;
+
+        const box = new THREE.Box3().setFromObject(mesh);
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z);
+        const distance = maxDim * 2.5;
+        camera.position.set(center.x + distance * 0.8, center.y + distance * 0.6, center.z + distance);
+        controls.target.copy(center);
+        controls.update();
+
+        statusDiv.textContent = '✅ Отображение активно';
+        uploadBtn.disabled = false;
+
+    } catch (err) {
+        statusDiv.textContent = '❌ ' + err.message;
+        uploadBtn.disabled = false;
+        console.error(err);
+    }
+});
+
+// Проверка WebGL
+(async () => {
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl');
+    if (!gl) {
+        statusDiv.textContent = '⚠️ WebGL не поддерживается';
+    }
+})();
+</script>
+</body>
+</html>
