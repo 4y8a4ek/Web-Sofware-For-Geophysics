@@ -162,11 +162,9 @@
                 <label>Z <input type="number" id="dimZ" min="1" step="1" disabled /></label>
             </div>
 
-            <label>
-                Фактор объединения
-                <input type="number" id="factor" value="1" min="1" step="1" style="width:60px;" />
-                <span class="hint">(1 – без изменений, 2 – объединить 2×2×2)</span>
-            </label>
+            <label>Уровень (level) <input type="number" id="level" value="0.5" min="0.0" max="1.0" step="0.01" style="width:60px;" /></label>
+            <label>Фактор (factor) <input type="number" id="factor" value="1" min="1" step="1" style="width:50px;" /></label>
+            <label>Maxh (размер элемента) <input type="number" id="maxh" value="1.0" min="0.1" step="0.1" style="width:60px;" /></label>
 
             <button id="uploadBtn" disabled>🚀 Построить</button>
             <span id="status">Готов</span>
@@ -199,7 +197,9 @@ const statusDiv = document.getElementById('status');
 const dimX = document.getElementById('dimX');
 const dimY = document.getElementById('dimY');
 const dimZ = document.getElementById('dimZ');
+const levelInput = document.getElementById('level');
 const factorInput = document.getElementById('factor');
+const maxhInput = document.getElementById('maxh');
 const container = document.getElementById('three-container');
 
 let selectedFile = null;
@@ -255,7 +255,6 @@ function initThree() {
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
-    controls.enableZoom = false; // <-- отключаем колесико
     controls.target.set(0, 0, 0);
     controls.update();
 
@@ -316,9 +315,11 @@ uploadBtn.addEventListener('click', async () => {
     const x = parseInt(dimX.value) || 200;
     const y = parseInt(dimY.value) || 200;
     const z = parseInt(dimZ.value) || 200;
+    const level = parseFloat(levelInput.value) || 0.5;
     const factor = parseInt(factorInput.value) || 1;
-    if (x<1 || y<1 || z<1 || factor<1) {
-        statusDiv.textContent = '❌ Размеры >= 1, фактор >= 1';
+    const maxh = parseFloat(maxhInput.value) || 1.0;
+    if (x<1 || y<1 || z<1 || factor<1 || maxh<=0) {
+        statusDiv.textContent = '❌ Проверьте параметры';
         return;
     }
 
@@ -330,7 +331,9 @@ uploadBtn.addEventListener('click', async () => {
     formData.append('shape_x', String(x));
     formData.append('shape_y', String(y));
     formData.append('shape_z', String(z));
+    formData.append('level', String(level));
     formData.append('factor', String(factor));
+    formData.append('maxh', String(maxh));
 
     try {
         const response = await fetch('/upload', { method: 'POST', body: formData });

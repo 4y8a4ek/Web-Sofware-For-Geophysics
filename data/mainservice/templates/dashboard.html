@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📊 Мониторинг в реальном времени</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0d1117; color: #e6edf3; margin: 0; padding: 20px; }
+        .container { max-width: 1600px; margin: auto; }
+        h1 { text-align: center; margin-bottom: 10px; font-weight: 300; letter-spacing: 1px; }
+        .subtitle { text-align: center; color: #8b949e; margin-bottom: 30px; font-size: 14px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .card { background: #161b22; border-radius: 12px; padding: 20px; border: 1px solid #30363d; }
+        .card h3 { margin: 0 0 12px 0; font-size: 14px; font-weight: 400; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+        .card .value { font-size: 36px; font-weight: 600; margin-bottom: 5px; }
+        .card .sub { font-size: 13px; color: #8b949e; }
+        .card .chart-container { height: 200px; width: 100%; }
+        .card .chart-container-sm { height: 120px; width: 100%; }
+        .status-ok { color: #3fb950; }
+        .status-error { color: #f85149; }
+        .status-warn { color: #d29922; }
+        .flex-row { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+        .update-time { color: #8b949e; font-size: 13px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        td, th { padding: 6px 8px; border-bottom: 1px solid #21262d; text-align: left; }
+        th { color: #8b949e; font-weight: 400; }
+        .mono { font-family: 'Courier New', monospace; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>📊 Мониторинг системы <span style="font-weight:300;font-size:18px;color:#8b949e;">| Mesh Generator MVP</span></h1>
+    <div class="subtitle">Обновление каждую секунду · Данные за последнюю минуту</div>
+
+    <!-- Карточки с текущими значениями -->
+    <div class="grid" id="statsCards"></div>
+
+    <!-- Графики -->
+    <div class="grid">
+        <div class="card">
+            <h3>📈 Запросов в секунду (rate)</h3>
+            <div class="chart-container"><canvas id="rateChart"></canvas></div>
+        </div>
+        <div class="card">
+            <h3>📊 Всего запросов (накоплено)</h3>
+            <div class="chart-container"><canvas id="totalRequestsChart"></canvas></div>
+        </div>
+        <div class="card">
+            <h3>⚙️ Задачи: успех / ошибка</h3>
+            <div class="chart-container"><canvas id="tasksChart"></canvas></div>
+        </div>
+        <div class="card">
+            <h3>🔄 Активные задачи</h3>
+            <div class="chart-container"><canvas id="activeTasksChart"></canvas></div>
+        </div>
+        <div class="card">
+            <h3>📍 Доля запросов по эндпоинтам</h3>
+            <div class="chart-container"><canvas id="endpointPieChart"></canvas></div>
+        </div>
+        <div class="card">
+            <h3>⏱ Распределение времени ответа</h3>
+            <div class="chart-container"><canvas id="durationHistogram"></canvas></div>
+        </div>
+    </div>
+
+    <!-- Таблица всех метрик -->
+    <div class="card">
+        <h3>📋 Текущие значения всех метрик</h3>
+        <div style="max-height: 300px; overflow-y: auto;">
+            <table id="metricsTable">
+                <thead><tr><th>Метрика</th><th>Значение</th><th>Лейблы</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+    // ==================== Глобальное состояние ====================
+    const MAX_HISTORY = 60; // 60 секунд (1 минута)
+    let history = {
+        time: [],
+        http_total: [],
+        tasks_success: [],
+        tasks_error: [],
+        active_tasks: [],
+        rate: [],
+        endpoint_counts: {} // {endpoint: total}
+    };
+    let previousMetrics = null; // для вычисления rate
+
+    // ==================== Инициализация графиков ====================
+    const charts = {};
+
+    function initCharts() {
+        const commonOpts = (title) => ({
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#8b949e' } } },
+            scales: {
+                x: { ticks: { color: '#8b949e', maxTicksLimit: 10 }, grid: { color: '#21262d' } },
+                y: { ticks: { color: '#8b949e' }, grid: { color: '#21262d' } }
+            }
+        });
+
+        // 1. Rate chart
+        const ctx1 = document.getElementById('rateChart').getContext('2d');
+        charts.rate = new Chart(ctx1, {
+            type: 'line',
+            data: { labels: [], datasets: [{ label: 'Запросов/с', data: [], borderColor: '#58a6ff', backgroundColor: 'rgba(88,166,255,0.1)', fill: true, tension: 0.3 }] },
+            options: { ...commonOpts('Запросов в секунду'), plugins: { legend: { display: false } } }
+        });
+
+        // 2. Total requests
+        const ctx2 = document.getElementById('totalRequestsChart').getContext('2d');
+        charts.totalRequests = new Chart(ctx2, {
+            type: 'line',
+            data: { labels: [], datasets: [{ label: 'Всего запросов', data: [], borderColor: '#3fb950', fill: false, tension: 0.3 }] },
+            options: commonOpts('Накопленные запросы')
+        });
+
+        // 3. Tasks (success/error)
+        const ctx3 = document.getElementById('tasksChart').getContext('2d');
+        charts.tasks = new Chart(ctx3, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    { label: 'Успешно', data: [], borderColor: '#3fb950', fill: false, tension: 0.3 },
+                    { label: 'Ошибки', data: [], borderColor: '#f85149', fill: false, tension: 0.3 }
+                ]
+            },
+            options: commonOpts('Задачи')
+        });
+
+        // 4. Active tasks
+        const ctx4 = document.getElementById('activeTasksChart').getContext('2d');
+        charts.activeTasks = new Chart(ctx4, {
+            type: 'line',
+            data: { labels: [], datasets: [{ label: 'Активных задач', data: [], borderColor: '#d29922', fill: true, backgroundColor: 'rgba(210,153,34,0.2)', tension: 0.3 }] },
+            options: { ...commonOpts('Активные задачи'), plugins: { legend: { display: false } } }
+        });
+
+        // 5. Pie chart by endpoints
+        const ctx5 = document.getElementById('endpointPieChart').getContext('2d');
+        charts.endpointPie = new Chart(ctx5, {
+            type: 'pie',
+            data: { labels: [], datasets: [{ data: [], backgroundColor: ['#58a6ff','#3fb950','#d29922','#f85149','#8b949e'] }] },
+            options: { plugins: { legend: { position: 'bottom', labels: { color: '#8b949e' } } }, maintainAspectRatio: false }
+        });
+
+        // 6. Duration histogram
+        const ctx6 = document.getElementById('durationHistogram').getContext('2d');
+        charts.durationHist = new Chart(ctx6, {
+            type: 'bar',
+            data: { labels: [], datasets: [{ label: 'Кол-во запросов', data: [], backgroundColor: 'rgba(88,166,255,0.6)' }] },
+            options: { ...commonOpts('Время ответа (сек)'), plugins: { legend: { display: false } } }
+        });
+    }
+
+    // ==================== Парсинг метрик ====================
+    function parseMetrics(text) {
+        const lines = text.split('\n');
+        const result = {};
+        for (let line of lines) {
+            line = line.trim();
+            if (line.startsWith('#') || line === '') continue;
+            const parts = line.split(' ');
+            if (parts.length < 2) continue;
+            const metricPart = parts[0];
+            const value = parseFloat(parts[parts.length - 1]);
+            const match = metricPart.match(/^(\w+)(?:\{(.*)\})?$/);
+            if (!match) continue;
+            const name = match[1];
+            const labelsStr = match[2] || '';
+            const labels = {};
+            if (labelsStr) {
+                labelsStr.split(',').forEach(pair => {
+                    const [k, v] = pair.split('=');
+                    if (k && v) labels[k.trim()] = v.trim().replace(/^"|"$/g, '');
+                });
+            }
+            if (!result[name]) result[name] = [];
+            result[name].push({ labels, value });
+        }
+        return result;
+    }
+
+    // ==================== Обновление UI ====================
+    function renderStats(metrics) {
+        const container = document.getElementById('statsCards');
+        const totalReqs = metrics['http_requests_total']?.reduce((s, d) => s + d.value, 0) || 0;
+        const tasksSuccess = metrics['tasks_processed_total']?.filter(d => d.labels.status === 'success').reduce((s, d) => s + d.value, 0) || 0;
+        const tasksError = metrics['tasks_processed_total']?.filter(d => d.labels.status === 'error').reduce((s, d) => s + d.value, 0) || 0;
+        const activeTasks = metrics['active_tasks']?.[metrics['active_tasks'].length - 1]?.value || 0;
+
+        container.innerHTML = `
+            <div class="card"><h3>📥 Всего запросов</h3><div class="value status-ok">${Math.round(totalReqs)}</div><div class="sub">за всё время</div></div>
+            <div class="card"><h3>✅ Успешных задач</h3><div class="value status-ok">${Math.round(tasksSuccess)}</div><div class="sub">обработано</div></div>
+            <div class="card"><h3>❌ Ошибок задач</h3><div class="value status-error">${Math.round(tasksError)}</div><div class="sub">сбоев</div></div>
+            <div class="card"><h3>🔄 Активных задач</h3><div class="value status-warn">${Math.round(activeTasks)}</div><div class="sub">сейчас выполняется</div></div>
+        `;
+    }
+
+    function updateCharts(metrics, timestamp) {
+        // Извлекаем нужные данные
+        const totalReqs = metrics['http_requests_total']?.reduce((s, d) => s + d.value, 0) || 0;
+        const tasksSuccess = metrics['tasks_processed_total']?.filter(d => d.labels.status === 'success').reduce((s, d) => s + d.value, 0) || 0;
+        const tasksError = metrics['tasks_processed_total']?.filter(d => d.labels.status === 'error').reduce((s, d) => s + d.value, 0) || 0;
+        const activeTasks = metrics['active_tasks']?.[metrics['active_tasks'].length - 1]?.value || 0;
+
+        // Считаем rate (запросов в секунду) по разнице
+        let rate = 0;
+        if (previousMetrics) {
+            const prevTotal = previousMetrics['http_requests_total']?.reduce((s, d) => s + d.value, 0) || 0;
+            const delta = totalReqs - prevTotal;
+            // delta за 1 секунду, так как обновляем каждую секунду
+            rate = delta;
+        }
+        previousMetrics = JSON.parse(JSON.stringify(metrics)); // копия
+
+        // Обновляем историю
+        if (history.time.length >= MAX_HISTORY) {
+            history.time.shift();
+            history.http_total.shift();
+            history.tasks_success.shift();
+            history.tasks_error.shift();
+            history.active_tasks.shift();
+            history.rate.shift();
+        }
+        history.time.push(timestamp);
+        history.http_total.push(totalReqs);
+        history.tasks_success.push(tasksSuccess);
+        history.tasks_error.push(tasksError);
+        history.active_tasks.push(activeTasks);
+        history.rate.push(rate);
+
+        // Обновляем endpoint counts для круговой диаграммы
+        const endpointData = metrics['http_requests_total']?.filter(d => d.labels.endpoint) || [];
+        const endpointCounts = {};
+        endpointData.forEach(item => {
+            const ep = item.labels.endpoint;
+            if (ep) {
+                endpointCounts[ep] = (endpointCounts[ep] || 0) + item.value;
+            }
+        });
+        // Если нет данных по эндпоинтам, добавляем заглушку
+        if (Object.keys(endpointCounts).length === 0) {
+            endpointCounts['нет данных'] = 1;
+        }
+        history.endpoint_counts = endpointCounts;
+
+        // ---- Обновление графиков ----
+        const labels = history.time.map(t => new Date(t).toLocaleTimeString());
+
+        // Rate
+        charts.rate.data.labels = labels;
+        charts.rate.data.datasets[0].data = history.rate;
+        charts.rate.update();
+
+        // Total requests
+        charts.totalRequests.data.labels = labels;
+        charts.totalRequests.data.datasets[0].data = history.http_total;
+        charts.totalRequests.update();
+
+        // Tasks
+        charts.tasks.data.labels = labels;
+        charts.tasks.data.datasets[0].data = history.tasks_success;
+        charts.tasks.data.datasets[1].data = history.tasks_error;
+        charts.tasks.update();
+
+        // Active tasks
+        charts.activeTasks.data.labels = labels;
+        charts.activeTasks.data.datasets[0].data = history.active_tasks;
+        charts.activeTasks.update();
+
+        // Pie chart by endpoints
+        const pieLabels = Object.keys(history.endpoint_counts);
+        const pieValues = Object.values(history.endpoint_counts);
+        charts.endpointPie.data.labels = pieLabels;
+        charts.endpointPie.data.datasets[0].data = pieValues;
+        charts.endpointPie.update();
+
+        // Histogram duration
+        const histData = metrics['http_request_duration_seconds_bucket'] || [];
+        const buckets = {};
+        histData.forEach(item => {
+            const le = item.labels.le;
+            if (le) buckets[le] = item.value;
+        });
+        const sortedKeys = Object.keys(buckets).sort((a, b) => parseFloat(a) - parseFloat(b));
+        const histLabels = sortedKeys.map(k => k === '+Inf' ? '∞' : k);
+        const histValues = sortedKeys.map(k => buckets[k]);
+        if (histValues.length > 0) {
+            charts.durationHist.data.labels = histLabels;
+            charts.durationHist.data.datasets[0].data = histValues;
+            charts.durationHist.update();
+        }
+    }
+
+    function renderTable(metrics) {
+        const tbody = document.querySelector('#metricsTable tbody');
+        tbody.innerHTML = '';
+        for (const [name, items] of Object.entries(metrics)) {
+            items.forEach(item => {
+                const labelStr = Object.entries(item.labels).map(([k,v]) => `${k}=${v}`).join(', ');
+                const row = `<tr><td class="mono">${name}</td><td>${item.value}</td><td>${labelStr || '—'}</td></tr>`;
+                tbody.innerHTML += row;
+            });
+        }
+    }
+
+    // ==================== Основной цикл ====================
+    let lastUpdate = 0;
+
+    async function loadMetrics() {
+        try {
+            const response = await fetch('/metrics');
+            const text = await response.text();
+            const metrics = parseMetrics(text);
+            const now = Date.now();
+
+            renderStats(metrics);
+            updateCharts(metrics, now);
+            renderTable(metrics);
+
+            document.getElementById('updateTime').textContent = new Date(now).toLocaleTimeString();
+        } catch (e) {
+            console.error('Ошибка загрузки метрик:', e);
+        }
+    }
+
+    // ==================== Инициализация ====================
+    document.addEventListener('DOMContentLoaded', () => {
+        initCharts();
+        loadMetrics();
+        setInterval(loadMetrics, 1000); // каждую секунду
+    });
+</script>
+</body>
+</html>

@@ -2,23 +2,35 @@ import os
 import uuid
 import json
 import asyncio
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse, HTMLResponse
+import time
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from starlette.requests import Request
 import numpy as np
 from skimage.measure import marching_cubes
 import open3d as o3d
 from config import DATA_DIR
 from aiokafka import AIOKafkaProducer
 import logging
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, REGISTRY
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Mesh Generator MVP")
 
+# ---------- Метрики ----------
+REQUESTS_TOTAL = Counter('http_requests_total', 'Total HTTP requests', ['method', 'endpoint', 'status'])
+REQUEST_DURATION = Histogram('http_request_duration_seconds', 'HTTP request duration', ['method', 'endpoint'])
+ACTIVE_TASKS = Gauge('active_tasks', 'Number of currently active tasks')
+TASKS_PROCESSED = Counter('tasks_processed_total', 'Total tasks processed', ['status'])
+
+@app.get("/metrics")
+async def metrics():
+    return Response(content=generate_latest(REGISTRY), media_type="text/plain")
+
+# ---------- Остальной код ----------
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
@@ -66,28 +78,30 @@ def generate_stl(raw_path: str, shape, factor: int) -> str:
     return stl_path
 
 async def process_task(task_id: str, raw_path: str, shape, factor: int):
+    ACTIVE_TASKS.inc()
     try:
         tasks[task_id]["status"] = "processing"
         stl_path = generate_stl(raw_path, shape, factor)
         tasks[task_id]["status"] = "done"
         tasks[task_id]["stl_path"] = stl_path
 
-        # Отправляем задачу в Kafka
         task_data = {
             "task_id": task_id,
             "stl_path": stl_path,
             "shape": shape,
             "factor": factor
         }
-        # Ждём пока producer инициализируется
         while producer is None:
             await asyncio.sleep(0.5)
         await producer.send("tasks", value=task_data)
 
+        TASKS_PROCESSED.labels(status='success').inc()
     except Exception as e:
         tasks[task_id]["status"] = "error"
         tasks[task_id]["error"] = str(e)
+        TASKS_PROCESSED.labels(status='error').inc()
     finally:
+        ACTIVE_TASKS.dec()
         if os.path.exists(raw_path):
             os.remove(raw_path)
 
@@ -141,6 +155,28 @@ async def download_stl(task_id: str, background_tasks: BackgroundTasks):
         media_type="application/vnd.ms-pki.stl",
         filename=f"model_{task_id}.stl"
     )
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    return templates.TemplateResponse("dashboard.html", {"request": request})
+
+@app.get("/dashboard_realtime", response_class=HTMLResponse)
+async def dashboard_realtime(request: Request):
+    return templates.TemplateResponse("dashboard_realtime.html", {"request": request})
+
+
+@app.middleware("http")
+async def prometheus_middleware(request: Request, call_next):
+    # Игнорируем запросы к дашборду и метрикам
+    if request.url.path.startswith("/dashboard") or request.url.path == "/metrics":
+        return await call_next(request)
+    
+    start = time.time()
+    response = await call_next(request)
+    duration = time.time() - start
+    REQUEST_DURATION.labels(method=request.method, endpoint=request.url.path).observe(duration)
+    REQUESTS_TOTAL.labels(method=request.method, endpoint=request.url.path, status=response.status_code).inc()
+    return response
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
