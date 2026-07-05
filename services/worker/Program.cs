@@ -8,14 +8,28 @@ using Confluent.Kafka;
 using Newtonsoft.Json;
 using StackExchange.Redis;
 using MeshDataModel;
+using Prometheus;
 
 namespace Worker
 {
     class Program
     {
+        private static readonly Counter TasksProcessed = Metrics
+            .CreateCounter("tasks_processed_total", "Total processed tasks", new CounterConfiguration
+            {
+                LabelNames = new[] { "status" }
+            });
+        private static readonly Gauge ActiveTasks = Metrics
+            .CreateGauge("active_tasks", "Currently active tasks");
+        private static readonly Histogram TaskProcessingDuration = Metrics
+            .CreateHistogram("task_processing_duration_seconds", "Processing time per task");
+
         static async Task Main(string[] args)
         {
-            Console.WriteLine("🚀 C# Worker started");
+            // Запускаем HTTP-сервер для метрик на порту 9000
+            var metricServer = new MetricServer(port: 9000);
+            metricServer.Start();
+            Console.WriteLine("🚀 C# Worker started, metrics on :9000");
 
             var consumerConfig = new ConsumerConfig
             {
@@ -43,47 +57,46 @@ namespace Worker
                     var taskData = JsonConvert.DeserializeObject<TaskData>(result.Message.Value);
                     Console.WriteLine($"📥 Received task: {taskData.TaskId}");
 
-                    // Обновляем статус в Redis
-                    await db.HashSetAsync($"task:{taskData.TaskId}", "status", "processing");
-
-                    // 1. Читаем STL
-                    var stlPath = taskData.StlPath;
-                    if (!File.Exists(stlPath))
+                    using (ActiveTasks.TrackInProgress())
+                    using (TaskProcessingDuration.NewTimer())
                     {
-                        Console.WriteLine($"❌ STL file not found: {stlPath}");
-                        await db.HashSetAsync($"task:{taskData.TaskId}", "status", "error");
-                        await db.HashSetAsync($"task:{taskData.TaskId}", "error", "STL file not found");
+                        await db.HashSetAsync($"task:{taskData.TaskId}", "status", "processing");
+
+                        var stlPath = taskData.StlPath;
+                        if (!File.Exists(stlPath))
+                        {
+                            Console.WriteLine($"❌ STL file not found: {stlPath}");
+                            await db.HashSetAsync($"task:{taskData.TaskId}", "status", "error");
+                            await db.HashSetAsync($"task:{taskData.TaskId}", "error", "STL file not found");
+                            TasksProcessed.WithLabels("error").Inc();
+                            consumer.Commit(result);
+                            continue;
+                        }
+
+                        var (vertices, triangles) = ParseStl(stlPath);
+                        Console.WriteLine($"✅ Loaded {vertices.Count} vertices, {triangles.Count} triangles");
+
+                        var (points, edges, faces, elements) = MeshBuilder.BuildFromTriangles(vertices, triangles);
+
+                        Console.WriteLine($"📊 Mesh statistics:");
+                        Console.WriteLine($"   Points: {points.Count}");
+                        Console.WriteLine($"   Edges: {edges.Count}");
+                        Console.WriteLine($"   Faces: {faces.Count}");
+                        Console.WriteLine($"   Elements (triangles): {elements.Count}");
+
+                        await db.HashSetAsync($"task:{taskData.TaskId}", "stats",
+                            $"Points:{points.Count},Edges:{edges.Count},Faces:{faces.Count},Elements:{elements.Count}");
+                        await db.HashSetAsync($"task:{taskData.TaskId}", "status", "done");
+
+                        TasksProcessed.WithLabels("success").Inc();
+                        Console.WriteLine($"✅ Task {taskData.TaskId} completed");
                         consumer.Commit(result);
-                        continue;
                     }
-
-                    // 2. Парсим STL в вершины и треугольники
-                    var (vertices, triangles) = ParseStl(stlPath);
-                    Console.WriteLine($"✅ Loaded {vertices.Count} vertices, {triangles.Count} triangles");
-
-                    // 3. Строим структуру данных
-                    var (points, edges, faces, elements) = MeshBuilder.BuildFromTriangles(vertices, triangles);
-
-                    // 4. Выводим статистику
-                    Console.WriteLine($"📊 Mesh statistics:");
-                    Console.WriteLine($"   Points: {points.Count}");
-                    Console.WriteLine($"   Edges: {edges.Count}");
-                    Console.WriteLine($"   Faces: {faces.Count}");
-                    Console.WriteLine($"   Elements (triangles): {elements.Count}");
-
-                    // 5. Сохраняем статистику в Redis (опционально)
-                    await db.HashSetAsync($"task:{taskData.TaskId}", "stats",
-                        $"Points:{points.Count},Edges:{edges.Count},Faces:{faces.Count},Elements:{elements.Count}");
-
-                    // 6. Обновляем статус в Redis
-                    await db.HashSetAsync($"task:{taskData.TaskId}", "status", "done");
-
-                    Console.WriteLine($"✅ Task {taskData.TaskId} completed");
-                    consumer.Commit(result);
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"❌ Error: {ex.Message}");
+                    TasksProcessed.WithLabels("error").Inc();
                 }
             }
         }
@@ -96,16 +109,13 @@ namespace Worker
             using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read);
             using var reader = new BinaryReader(fs);
 
-            // 80-байтовый заголовок
             reader.ReadBytes(80);
             uint triangleCount = reader.ReadUInt32();
 
             for (int i = 0; i < triangleCount; i++)
             {
-                // Нормаль (пропускаем)
                 reader.ReadSingle(); reader.ReadSingle(); reader.ReadSingle();
 
-                // 3 вершины
                 var v0 = new Vector3(reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle());
                 var v1 = new Vector3(reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle());
                 var v2 = new Vector3(reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle());
@@ -119,7 +129,6 @@ namespace Worker
 
                 triangles.Add((idx0, idx1, idx2));
 
-                // 2-байтовый атрибут (пропускаем)
                 reader.ReadUInt16();
             }
 
